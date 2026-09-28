@@ -19,6 +19,7 @@ No Xcode required - just the Command Line Tools Swift toolchain.
 ./build.sh --install # build, install to /Applications, and launch it there
 ./build.sh --run     # build and (re)launch from ./build.noindex, without installing
 ./build.sh           # build only
+./test.sh            # run the unit tests
 ```
 
 `--install` is what makes it a real app: `/Applications` is the only location Spotlight
@@ -108,6 +109,7 @@ will not meet, so a personal tap is the practical route either way.
 | Move the window | drag anywhere on it |
 | Send a message | **Enter** (**⇧Enter** for a newline) |
 | Start a new conversation | **⌘N**, the **New** button in the header, or the menu |
+| See how much of your plan is left | glance at the menu bar; click it for every limit |
 | Reload / Quit | menu-bar icon |
 | Stop it following the active window | menu bar → **Follow Active Window** |
 | Make conversations translucent too | menu bar → **Translucent Chat** |
@@ -129,7 +131,11 @@ bindable from Raycast, Shortcuts, or Alfred.
 | `PopupWindow.swift` | Real secondary window for `window.open` sign-in popups. |
 | `GlobalHotKey.swift` | System-wide hot key via Carbon (no Accessibility permission needed), with fallback combos. |
 | `Log.swift` | stderr + `~/Library/Logs/ClaudeCompanion.log` logging. |
+| `Usage.swift` | Plan-usage model: decoding claude.ai's usage reply, and its wording. |
+| `UsageMonitor.swift` | Polls plan usage through the signed-in web view, for Claude Code's organization. |
+| `UsageIndicator.swift` | The menu-bar ring gauge and the per-limit menu rows. |
 | `build.sh` | Compiles with SwiftPM and assembles a signed `.app` bundle. |
+| `test.sh` | Runs the unit tests, with or without Xcode installed. |
 | `Tools/make-icon.swift` | Draws the app icon and writes `Resources/AppIcon.icns`. |
 
 ### Appearance
@@ -332,6 +338,44 @@ layout compact: composer 120pt -> panel 140pt
 health check: ... compact=true viewport=140 composer=10..130 fits
 stray elements: no stray elements
 ```
+
+## Plan usage
+
+The menu-bar item shows how much of your Claude plan is **left** - a ring beside
+the app's symbol plus a percentage, like a battery. It tracks whichever limit you will
+hit first (the one claude.ai marks active: usually the 5-hour session, sometimes the
+weekly allowance). The percentage turns orange at 25% left and red at 10%, and the
+gauge dims once a reading is over five minutes old. Click it for every limit, each with
+a bar and its reset time, plus **Usage Details…** for claude.ai's own usage page.
+
+![Usage gauge and menu rows, light and dark](Resources/usage-preview.png)
+
+- **It asks claude.ai, from inside the web view.** `GET /api/organizations/<uuid>/usage`
+  is what claude.ai's usage page reads. Fetching it in the page means the request is
+  already signed in, same-origin and past Cloudflare; a native `URLSession` request
+  would need the cookies copied across and could still be challenged. It runs in the
+  `.defaultClient` script world, isolated from claude.ai's own JavaScript.
+- **It reads Claude Code's organization, not the web session's.** One account can
+  belong to several organizations - a personal Max plan and a team, say - each with
+  separate limits, and the web session's last-used one need not be the one Claude Code
+  bills. `~/.claude.json` (`oauthAccount.organizationUuid`) names Claude Code's, and is
+  re-read on every refresh. Fallbacks, in order: an organization with a personal
+  subscription, the web session's last-used organization, any with chat. One that is
+  listed but has no plan usage (an API-only organization answers 403) is skipped. The
+  menu names the plan, so it is always clear which one is shown.
+- **The `limits` list is the source of truth**, with `five_hour` / `seven_day` as a
+  fallback. The reply is full of codenamed, experimental keys, so neither shape is
+  assumed to be permanent; `UsageTests` pins the parsing against a real reply.
+- Refreshed every 60 seconds, when the menu opens, when the window is dismissed (what
+  you just asked has counted by then), and on every claude.ai page load. A failed
+  refresh keeps the last reading; signing out clears it, since it belonged to a session
+  that is gone. With no reading the item is just the symbol, as before.
+
+`claudecompanion://usage` refreshes immediately and logs the reading;
+`claudecompanion://render-usage` draws the gauge at every level and the menu rows, in
+light and dark, to `/tmp/cc-usage.png`. That replica is the only way to inspect them
+pixel by pixel: on current macOS the menu-bar item and its menu are drawn by Control
+Center, out of process, so no capture of this app's windows can see them.
 
 ## Diagnosing the page
 

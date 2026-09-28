@@ -9,6 +9,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var hotKey: GlobalHotKey!
     private var toggleMenuItem: NSMenuItem!
+    private var statusMenu: NSMenu!
+    private var usageMonitor: UsageMonitor!
+    /// The usage section at the top of the menu, rebuilt on every reading.
+    private var usageMenuItems: [NSMenuItem] = []
+    private var menuIsOpen = false
+    private let usagePageURL = URL(string: "https://claude.ai/settings/usage")!
     /// Open sign-in popups, retained so they aren't deallocated while visible.
     private var popups: [PopupWindowController] = []
     /// URLs received before launch finished (see `application(_:open:)`).
@@ -75,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Log.info("status item built")
         buildPanel()
         Log.info("panel built")
+        startUsageMonitor()
         registerHotKey()
         Log.info("hot key setup done")
 
@@ -124,7 +131,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(
-                systemSymbolName: "bubble.left.and.bubble.right",
+                systemSymbolName: UsageIndicator.symbolName,
                 accessibilityDescription: "Claude Companion"
             )
             button.image?.isTemplate = true
@@ -171,8 +178,122 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: "q"
         )
         menu.items.forEach { $0.target = self }
+        menu.delegate = self
         statusItem.menu = menu
+        statusMenu = menu
         updateLoginItemState()
+    }
+
+    // MARK: - Plan usage
+
+    private func startUsageMonitor() {
+        usageMonitor = UsageMonitor(webView: webView)
+        usageMonitor.onChange = { [weak self] in self?.updateUsageDisplay() }
+        usageMonitor.start()
+        updateUsageDisplay()
+    }
+
+    /// Shows what's left of the limit you'll hit first in the menu bar, as a ring
+    /// beside the app's symbol plus a percentage. With no reading - signed out,
+    /// or not fetched yet - the item is just the symbol, as it always was.
+    private func updateUsageDisplay() {
+        guard let button = statusItem.button else { return }
+
+        if let usage = usageMonitor.usage, let headline = usage.headline {
+            let stale = usageMonitor.isStale
+            button.image = UsageIndicator.statusImage(
+                fractionLeft: headline.fractionLeft, dimmed: stale
+            )
+            let left = UsageText.percent(headline.percentLeft)
+            button.attributedTitle = UsageIndicator.statusTitle(for: headline, dimmed: stale)
+            button.imagePosition = .imageLeading
+            button.toolTip = "\(headline.title): \(left) left · "
+                + UsageText.resets(at: headline.resetsAt)
+            button.setAccessibilityLabel("Claude Companion. \(headline.title): \(left) left")
+        } else {
+            button.image = NSImage(
+                systemSymbolName: UsageIndicator.symbolName,
+                accessibilityDescription: "Claude Companion"
+            )
+            button.image?.isTemplate = true
+            button.title = ""
+            button.imagePosition = .imageOnly
+            button.toolTip = usageMonitor.problem ?? "Claude Companion"
+            button.setAccessibilityLabel("Claude Companion")
+        }
+
+        // An open menu is rebuilt in place, so a reading that arrives while you
+        // are looking at it shows up without closing and reopening.
+        if menuIsOpen { rebuildUsageMenuItems() }
+    }
+
+    /// The top of the menu: the plan, one row per limit, and how fresh it is.
+    private func rebuildUsageMenuItems() {
+        usageMenuItems.forEach(statusMenu.removeItem)
+        usageMenuItems = []
+
+        let now = Date()
+        var items: [NSMenuItem] = []
+        let usage = usageMonitor.usage
+        items.append(sectionHeader(usage.map { "Claude \($0.plan)" } ?? "Plan Usage"))
+
+        for limit in usage?.limits ?? [] {
+            let item = NSMenuItem()
+            item.view = UsageRowView(limit: limit, now: now)
+            items.append(item)
+        }
+
+        let status: String
+        if let problem = usageMonitor.problem {
+            status = usage.map { "\(problem) · " + UsageText.updated(at: $0.fetchedAt, now: now) }
+                ?? problem
+        } else if let usage {
+            status = UsageText.updated(at: usage.fetchedAt, now: now)
+        } else {
+            status = "Checking usage…"
+        }
+        let freshness = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+        freshness.attributedTitle = NSAttributedString(
+            string: status,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+        )
+        freshness.isEnabled = false
+        items.append(freshness)
+
+        let details = NSMenuItem(
+            title: "Usage Details…", action: #selector(openUsagePage), keyEquivalent: ""
+        )
+        details.target = self
+        items.append(details)
+        items.append(.separator())
+
+        for (index, item) in items.enumerated() {
+            statusMenu.insertItem(item, at: index)
+        }
+        usageMenuItems = items
+    }
+
+    private func sectionHeader(_ title: String) -> NSMenuItem {
+        if #available(macOS 14, *) {
+            return .sectionHeader(title: title)
+        }
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+        )
+        item.isEnabled = false
+        return item
+    }
+
+    @objc private func openUsagePage() {
+        NSWorkspace.shared.open(usagePageURL)
     }
 
     /// Reflects the hot key we actually got, so the shortcut is never a mystery.
@@ -473,6 +594,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if panel.isVisible {
             Log.info("hiding panel")
             panel.orderOut(nil)
+            // Whatever was just asked has counted against the plan by now.
+            usageMonitor.refresh()
         } else {
             Log.info("showing panel")
             positionPanel()
@@ -517,6 +640,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "snapshot": captureSnapshots()
             case "screengrab": captureOnScreen()
             case "login-item": toggleLoginItem()
+            case "usage":
+                // Refreshes now; the reading lands in the log.
+                usageMonitor.refresh()
+            case "render-usage": renderUsagePreview()
             default: toggle()
             }
         }
@@ -593,6 +720,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Log.info("screengrab: \(image.width)x\(image.height) -> \(path)")
             }
         }
+    }
+
+    /// Draws the usage display offscreen to `/tmp/cc-usage.png`, from the current
+    /// reading and variants of it at each warning level, in light and dark.
+    ///
+    /// On current macOS the menu bar item and its menu are drawn by Control
+    /// Center, out of process, so neither `cacheDisplay` nor a window capture of
+    /// this app can see them - this replica is the way to check them pixel by pixel.
+    private func renderUsagePreview() {
+        guard let usage = usageMonitor.usage,
+              let image = UsageIndicator.preview(of: usage, stale: usageMonitor.isStale),
+              let png = Self.png(from: image) else {
+            Log.warn("render usage: no reading yet")
+            return
+        }
+        try? png.write(to: URL(fileURLWithPath: "/tmp/cc-usage.png"))
+        Log.info("render usage: \(Int(image.size.width))x\(Int(image.size.height)) -> /tmp/cc-usage.png")
     }
 
     private static func png(from image: NSImage) -> Data? {
@@ -841,6 +985,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - NSMenuDelegate
+
+extension AppDelegate: NSMenuDelegate {
+    /// Rebuilds the usage section so its relative times ("resets in…", "updated…")
+    /// are current, and asks for a fresh reading, which replaces it on arrival.
+    func menuWillOpen(_ menu: NSMenu) {
+        menuIsOpen = true
+        rebuildUsageMenuItems()
+        usageMonitor.refresh()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+    }
+}
+
 // MARK: - WKScriptMessageHandler
 
 extension AppDelegate: WKScriptMessageHandler {
@@ -981,6 +1141,9 @@ extension AppDelegate: WKNavigationDelegate {
 
         guard url.host?.contains("claude.ai") == true else { return }
         applyChatOpacity()
+        // The first chance to read usage after launch or sign-in, without waiting
+        // a whole polling interval.
+        usageMonitor.refresh()
 
         // Confirm the stylesheet landed. claude.ai's markup can change under us, so a
         // silently-failed injection should show up in the log rather than as a
