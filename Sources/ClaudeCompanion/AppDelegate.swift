@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var toggleMenuItem: NSMenuItem!
     /// Open sign-in popups, retained so they aren't deallocated while visible.
     private var popups: [PopupWindowController] = []
+    /// URLs received before launch finished (see `application(_:open:)`).
+    private var pendingURLs: [URL] = []
 
     // Tunables for the floating window.
     private let panelSize = NSSize(width: 440, height: 620)
@@ -82,7 +84,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: Self.toggleNotification,
             object: nil
         )
-        // Start hidden; the user summons it with the hot key.
+        // Start hidden; the user summons it with the hot key - unless a URL
+        // launched us, which runs now that there is something to act on.
+        let urls = pendingURLs
+        pendingURLs = []
+        if !urls.isEmpty { application(NSApp, open: urls) }
     }
 
     // MARK: - Tracking what the user is working in
@@ -480,7 +486,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Handles `claudecompanion://toggle` (and `://show`, `://hide`), so the window
     /// can be summoned from Raycast, Shortcuts, or the CLI as well as the hot key.
+    ///
+    /// A URL that launches the app arrives *before* `applicationDidFinishLaunching`,
+    /// when there is no panel or web view yet to act on, so it is held until then.
     func application(_ application: NSApplication, open urls: [URL]) {
+        guard panel != nil else {
+            pendingURLs += urls
+            return
+        }
         for url in urls {
             switch url.host ?? url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) {
             case "show": if !panel.isVisible { toggle() }

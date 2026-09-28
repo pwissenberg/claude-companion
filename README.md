@@ -464,6 +464,10 @@ If the shortcut does nothing, the menu-bar menu will tell you which combo is liv
 
 ## Bugs found and fixed during the first POC
 
+- **Crash when a URL launched the app.** `open "claudecompanion://toggle"` (or
+  `./toggle.sh`) with the app not running delivers the URL *before*
+  `applicationDidFinishLaunching`, when the panel doesn't exist yet, and the handler
+  crashed on it. URLs that arrive early are now held and run once launch finishes.
 - **Silent startup failure.** Setting both `.canJoinAllSpaces` and
   `.moveToActiveSpace` on `collectionBehavior` is invalid (mutually exclusive) and
   raised an ObjC exception that AppKit swallowed. It aborted panel construction
