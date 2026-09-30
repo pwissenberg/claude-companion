@@ -81,6 +81,18 @@ private func limit(used: Double, severity: String? = "normal") -> UsageLimit {
     #expect(usage.headline?.percentLeft == 28)
 }
 
+@Test func perWindowFallbackIsClampedLikeLimits() throws {
+    let reply = #"""
+    {"status": 200, "org": {"uuid": "o"},
+     "usage": {"five_hour": {"utilization": 130.0, "resets_at": "2026-09-28T14:19:59+00:00"}}}
+    """#
+    let usage = try #require(try usage(from: reply))
+    #expect(usage.limits.map(\.title) == ["Current session"])
+    #expect(usage.limits.map(\.percentUsed) == [100])
+    #expect(usage.limits[0].resetsAt == MaxResets.session)
+    #expect(usage.limits[0].isActive == false)
+}
+
 @Test func noUsageMeansNoReading() throws {
     #expect(try usage(from: #"{"status": 403}"#) == nil)
     #expect(try usage(from: #"{"status": 200, "usage": {"limits": []}}"#) == nil)

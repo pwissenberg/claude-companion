@@ -115,49 +115,18 @@ extension PlanUsage {
     init?(_ result: UsageFetchResult, fetchedAt: Date) {
         guard let usage = result.usage else { return nil }
 
-        // A limit without a percentage has nothing to show; the rest of the list
-        // is still worth showing, so it is skipped rather than failing the reading.
-        var limits = (usage.limits ?? []).compactMap { limit -> UsageLimit? in
-            guard let percent = limit.percent else { return nil }
-            return UsageLimit(
-                title: Self.title(for: limit),
-                percentUsed: min(max(percent, 0), 100),
-                resetsAt: limit.resetsAt.flatMap(Self.parseDate),
-                isActive: limit.isActive ?? false,
-                severity: limit.severity
-            )
-        }
+        var limits = (usage.limits ?? []).compactMap(UsageLimit.init)
         if limits.isEmpty {
-            let windows = [("Current session", usage.fiveHour), ("Weekly · all models", usage.sevenDay)]
-            limits = windows.compactMap { title, window in
-                guard let used = window?.utilization else { return nil }
-                return UsageLimit(
-                    title: title,
-                    percentUsed: min(max(used, 0), 100),
-                    resetsAt: window?.resetsAt.flatMap(Self.parseDate),
-                    isActive: false,
-                    severity: nil
-                )
+            // The per-window fields are recast as limits so titles and clamping
+            // are decided in one place, whichever shape the reply took.
+            let windows = [("session", usage.fiveHour), ("weekly_all", usage.sevenDay)]
+            limits = windows.compactMap { kind, window in
+                window.flatMap { UsageLimit(UsageResponse.Limit(kind: kind, window: $0)) }
             }
         }
         guard !limits.isEmpty else { return nil }
 
         self.init(plan: Self.planName(for: result.org), limits: limits, fetchedAt: fetchedAt)
-    }
-
-    private static func title(for limit: UsageResponse.Limit) -> String {
-        switch limit.kind {
-        case "session":
-            return "Current session"
-        case "weekly_all":
-            return "Weekly · all models"
-        case "weekly_scoped":
-            return "Weekly · " + (limit.scope?.model?.displayName ?? "scoped")
-        default:
-            // An unrecognised kind is still worth showing; its own name is the
-            // most honest label available.
-            return (limit.kind ?? "limit").replacingOccurrences(of: "_", with: " ").capitalized
-        }
     }
 
     static func planName(for org: UsageFetchResult.Organization?) -> String {
@@ -180,6 +149,44 @@ extension PlanUsage {
             of: #"\.\d+"#, with: "", options: .regularExpression
         )
         return ISO8601DateFormatter().date(from: whole)
+    }
+}
+
+extension UsageLimit {
+    /// A limit without a percentage has nothing to show; the rest of the list
+    /// is still worth showing, so it is skipped rather than failing the reading.
+    init?(_ limit: UsageResponse.Limit) {
+        guard let percent = limit.percent else { return nil }
+        self.init(
+            title: Self.title(for: limit),
+            percentUsed: min(max(percent, 0), 100),
+            resetsAt: limit.resetsAt.flatMap(PlanUsage.parseDate),
+            isActive: limit.isActive ?? false,
+            severity: limit.severity
+        )
+    }
+
+    private static func title(for limit: UsageResponse.Limit) -> String {
+        switch limit.kind {
+        case "session":
+            return "Current session"
+        case "weekly_all":
+            return "Weekly · all models"
+        case "weekly_scoped":
+            return "Weekly · " + (limit.scope?.model?.displayName ?? "scoped")
+        default:
+            // An unrecognised kind is still worth showing; its own name is the
+            // most honest label available.
+            return (limit.kind ?? "limit").replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+}
+
+private extension UsageResponse.Limit {
+    /// The older per-window shape, given the fields of a `limits` entry.
+    init(kind: String, window: UsageResponse.Window) {
+        self.init(kind: kind, group: nil, percent: window.utilization, severity: nil,
+                  resetsAt: window.resetsAt, scope: nil, isActive: nil)
     }
 }
 

@@ -31,6 +31,9 @@ final class UsageMonitor {
     private var timer: Timer?
     private var inFlight = false
     private var loggedSummary = ""
+    /// Set by the diagnostic URL hook: the next outcome is logged even if it is
+    /// the same as the last one, so the hook visibly did something.
+    private var logNextReading = false
     private let interval: TimeInterval = 60
     /// How many refreshes in a row claude.ai has refused the organization list.
     private var consecutiveRefusals = 0
@@ -59,7 +62,8 @@ final class UsageMonitor {
         return Date().timeIntervalSince(usage.fetchedAt) > Self.staleAfter
     }
 
-    func refresh() {
+    func refresh(alwaysLog: Bool = false) {
+        if alwaysLog { logNextReading = true }
         guard !inFlight, let webView else { return }
         // Mid sign-in the main frame may be on another host, where the request
         // would go to the wrong origin. Still report in, so a reading that ages
@@ -71,6 +75,10 @@ final class UsageMonitor {
         // cookies would not accompany. The navigation delegate's looser check only
         // decides when to *try* a refresh; this decides whether one can work.
         guard webView.url?.host == "claude.ai" else {
+            if logNextReading {
+                Log.warn("usage: no reading - the page is on \(webView.url?.host ?? "no host"), not claude.ai")
+                logNextReading = false
+            }
             onChange?()
             return
         }
@@ -132,17 +140,19 @@ final class UsageMonitor {
         let summary = "\(reading.plan) (\(source)) - " + reading.limits
             .map { "\($0.title) \(UsageText.percent($0.percentUsed)) used" }
             .joined(separator: ", ")
-        if summary != loggedSummary || problem != nil {
+        if summary != loggedSummary || problem != nil || logNextReading {
             Log.info("usage: \(summary)")
             loggedSummary = summary
         }
+        logNextReading = false
         usage = reading
         problem = nil
         onChange?()
     }
 
     private func fail(_ message: String, log detail: String) {
-        if problem != message { Log.warn("usage: \(message) - \(detail)") }
+        if problem != message || logNextReading { Log.warn("usage: \(message) - \(detail)") }
+        logNextReading = false
         problem = message
         onChange?()
     }
@@ -184,13 +194,18 @@ final class UsageMonitor {
     /// Swift side decodes it with `Codable` rather than picking through bridged
     /// dictionaries.
     ///
+    /// Every request times out: a reply that never arrives would otherwise leave
+    /// the promise unsettled and `inFlight` set for good, freezing the gauge on
+    /// its last number. A timeout rejects instead and takes the normal failure path.
+    ///
     /// Order of preference: Claude Code's organization; then one with a personal
     /// subscription; then the organization the web session last used; then any
     /// with chat.
     static let fetchJS = """
     const load = async (path) => {
       const response = await fetch('https://claude.ai/api/organizations' + path, {
-        credentials: 'include', headers: { accept: 'application/json' }
+        credentials: 'include', headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(20000)
       });
       return { status: response.status, body: response.ok ? await response.json() : null };
     };

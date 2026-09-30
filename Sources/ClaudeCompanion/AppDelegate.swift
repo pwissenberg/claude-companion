@@ -641,8 +641,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "screengrab": captureOnScreen()
             case "login-item": toggleLoginItem()
             case "usage":
-                // Refreshes now; the reading lands in the log.
-                usageMonitor.refresh()
+                // Refreshes now; the reading lands in the log even if unchanged.
+                usageMonitor.refresh(alwaysLog: true)
             case "render-usage": renderUsagePreview()
             default: toggle()
             }
