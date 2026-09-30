@@ -19,6 +19,7 @@ No Xcode required - just the Command Line Tools Swift toolchain.
 ./build.sh --install # build, install to /Applications, and launch it there
 ./build.sh --run     # build and (re)launch from ./build.noindex, without installing
 ./build.sh           # build only
+./test.sh            # run the unit tests
 ```
 
 `--install` is what makes it a real app: `/Applications` is the only location Spotlight
@@ -30,6 +31,12 @@ signature.
 The build directory is named `build.noindex` because macOS skips indexing directories
 with that suffix. Otherwise Spotlight offers two identical "Claude Companion" entries
 and you can't tell which one you're launching.
+
+`./test.sh` wraps `swift test`. The tests use Swift Testing, which the Command Line
+Tools ship outside the default search paths and only for macOS 14 or later, so the
+script points the toolchain at it and builds the tests for macOS 14. The app itself
+still targets macOS 13. With Xcode installed it is plain `swift test`; extra arguments
+are passed through.
 
 ### Starting and stopping
 
@@ -108,6 +115,7 @@ will not meet, so a personal tap is the practical route either way.
 | Move the window | drag anywhere on it |
 | Send a message | **Enter** (**⇧Enter** for a newline) |
 | Start a new conversation | **⌘N**, the **New** button in the header, or the menu |
+| See how much of your plan is left | glance at the menu bar; click it for every limit |
 | Reload / Quit | menu-bar icon |
 | Stop it following the active window | menu bar → **Follow Active Window** |
 | Make conversations translucent too | menu bar → **Translucent Chat** |
@@ -129,7 +137,12 @@ bindable from Raycast, Shortcuts, or Alfred.
 | `PopupWindow.swift` | Real secondary window for `window.open` sign-in popups. |
 | `GlobalHotKey.swift` | System-wide hot key via Carbon (no Accessibility permission needed), with fallback combos. |
 | `Log.swift` | stderr + `~/Library/Logs/ClaudeCompanion.log` logging. |
+| `Usage.swift` | Plan-usage model: decoding claude.ai's usage reply, and its wording. |
+| `UsageMonitor.swift` | Polls plan usage through the signed-in web view, for Claude Code's organization. |
+| `UsageIndicator.swift` | The menu-bar ring gauge and the per-limit menu rows. |
 | `build.sh` | Compiles with SwiftPM and assembles a signed `.app` bundle. |
+| `test.sh` | Runs the unit tests, with or without Xcode installed. |
+| `Tests/ClaudeCompanionTests/UsageTests.swift` | Pins usage decoding, the headline choice, warning levels, and the wording. |
 | `Tools/make-icon.swift` | Draws the app icon and writes `Resources/AppIcon.icns`. |
 
 ### Appearance
@@ -333,6 +346,56 @@ health check: ... compact=true viewport=140 composer=10..130 fits
 stray elements: no stray elements
 ```
 
+## Plan usage
+
+The menu-bar item shows how much of your Claude plan is **left** - a ring beside
+the app's symbol plus a percentage, like a battery. It tracks whichever limit you will
+hit first (the one claude.ai marks active: usually the 5-hour session, sometimes the
+weekly allowance; if none is marked, the most used). The percentage turns orange at
+25% left and red at 10% - and orange whenever claude.ai itself rates a limit as
+anything but normal, so a warning it shows on the web is never shown here as fine.
+The gauge dims once a reading is over five minutes old; hovering shows the limit's
+name and reset time. Click it for the menu: the plan's name, one row per limit with a
+bar and its reset time ("Resets in 4 hr 28 min", a weekday and time beyond a day, or
+"Reset pending" once the reset has passed and the next reading hasn't landed), a line
+saying how fresh the reading is, and **Usage Details…** for claude.ai's own usage page.
+
+![Usage gauge and menu rows, light and dark](Resources/usage-preview.png)
+
+- **It asks claude.ai, from inside the web view.** `GET /api/organizations/<uuid>/usage`
+  is what claude.ai's usage page reads. Fetching it in the page means the request is
+  already signed in, same-origin and past Cloudflare; a native `URLSession` request
+  would need the cookies copied across and could still be challenged. It runs in the
+  `.defaultClient` script world, isolated from claude.ai's own JavaScript.
+- **It reads Claude Code's organization, not the web session's.** One account can
+  belong to several organizations - a personal Max plan and a team, say - each with
+  separate limits, and the web session's last-used one need not be the one Claude Code
+  bills. `~/.claude.json` (`oauthAccount.organizationUuid`; `$CLAUDE_CONFIG_DIR` is
+  honoured) names Claude Code's, and is checked on every refresh but only re-parsed
+  when its modification date changes - it holds Claude Code's whole project history and
+  grows to megabytes - so switching Claude Code's account is picked up without a
+  relaunch. Fallbacks, in order: an organization with a
+  personal subscription, the web session's last-used organization, any with chat. One
+  that is listed but has no plan usage (an API-only organization answers 403) is
+  skipped. The menu names the plan, so it is always clear which one is shown.
+- **The `limits` list is the source of truth**, with `five_hour` / `seven_day` as a
+  fallback. The reply is full of codenamed, experimental keys, so neither shape is
+  assumed to be permanent; `UsageTests` pins the parsing against a real reply.
+- Refreshed every 60 seconds, when the menu opens, when the window is dismissed (what
+  you just asked has counted by then), and on every claude.ai page load. Each request
+  gives up after 20 seconds, so a reply that never comes can't freeze the gauge on its
+  last number. A failed refresh keeps the last reading; signing out clears it, since it
+  belonged to a session that is gone - but only once claude.ai has refused the
+  organization list twice in a row, because a Cloudflare challenge answers 403 too and
+  one of those must not throw a valid reading away. With no reading the item is just
+  the symbol, as before, and its tooltip says why.
+
+`claudecompanion://usage` refreshes immediately and logs the reading;
+`claudecompanion://render-usage` draws the gauge at every level and the menu rows, in
+light and dark, to `/tmp/cc-usage.png`. That replica is the only way to inspect them
+pixel by pixel: on current macOS the menu-bar item and its menu are drawn by Control
+Center, out of process, so no capture of this app's windows can see them.
+
 ## Diagnosing the page
 
 Geometry logs report correct rects **whether or not anything was painted**, so they
@@ -443,6 +506,11 @@ tail -20 ~/Library/Logs/ClaudeCompanion.log
 If the shortcut does nothing, the menu-bar menu will tell you which combo is live
 (another app may have taken ⌥Space). `./toggle.sh` always works regardless.
 
+If the menu bar shows no percentage, the item's tooltip and the menu's freshness line
+say why (not signed in, claude.ai unreachable, no limits reported). `open -g
+"claudecompanion://usage"` forces a refresh and writes the outcome to the log as a
+`usage:` line even when nothing changed.
+
 ## Known limitations (v0.1 POC)
 
 - **Passkeys do not work**, and cannot be made to. WKWebView exposes
@@ -461,9 +529,17 @@ If the shortcut does nothing, the menu-bar menu will tell you which combo is liv
   `[data-testid="chat-input"]`, `main.dframe-content`). If Anthropic renames those,
   the sidebar reappears or compact mode stops working - the `style check` log line is
   how you'd spot it.
+- Plan usage reads an undocumented claude.ai endpoint
+  (`/api/organizations/<uuid>/usage`). If its shape changes, no wrong number is shown:
+  the last good reading stays, dimmed once it is stale, and the menu's freshness line
+  and the `usage:` log lines say what went wrong.
 
 ## Bugs found and fixed during the first POC
 
+- **Crash when a URL launched the app.** `open "claudecompanion://toggle"` (or
+  `./toggle.sh`) with the app not running delivers the URL *before*
+  `applicationDidFinishLaunching`, when the panel doesn't exist yet, and the handler
+  crashed on it. URLs that arrive early are now held and run once launch finishes.
 - **Silent startup failure.** Setting both `.canJoinAllSpaces` and
   `.moveToActiveSpace` on `collectionBehavior` is invalid (mutually exclusive) and
   raised an ObjC exception that AppKit swallowed. It aborted panel construction
