@@ -359,10 +359,11 @@ a bar and its reset time, plus **Usage Details…** for claude.ai's own usage pa
   belong to several organizations - a personal Max plan and a team, say - each with
   separate limits, and the web session's last-used one need not be the one Claude Code
   bills. `~/.claude.json` (`oauthAccount.organizationUuid`) names Claude Code's, and is
-  re-read on every refresh. Fallbacks, in order: an organization with a personal
-  subscription, the web session's last-used organization, any with chat. One that is
-  listed but has no plan usage (an API-only organization answers 403) is skipped. The
-  menu names the plan, so it is always clear which one is shown.
+  checked on every refresh and re-read when it changes, so switching Claude Code's
+  account is picked up without a relaunch. Fallbacks, in order: an organization with a
+  personal subscription, the web session's last-used organization, any with chat. One
+  that is listed but has no plan usage (an API-only organization answers 403) is
+  skipped. The menu names the plan, so it is always clear which one is shown.
 - **The `limits` list is the source of truth**, with `five_hour` / `seven_day` as a
   fallback. The reply is full of codenamed, experimental keys, so neither shape is
   assumed to be permanent; `UsageTests` pins the parsing against a real reply.

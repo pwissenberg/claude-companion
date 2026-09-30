@@ -998,8 +998,10 @@ extension AppDelegate: NSMenuDelegate {
 
     /// Asks for a fresh reading, which replaces the section on arrival.
     func menuWillOpen(_ menu: NSMenu) {
-        menuIsOpen = true
+        // Refresh first: off claude.ai it reports back synchronously, and with the
+        // flag already up that would rebuild the items in here, which AppKit forbids.
         usageMonitor.refresh()
+        menuIsOpen = true
     }
 
     func menuDidClose(_ menu: NSMenu) {
