@@ -86,9 +86,37 @@ private func limit(used: Double, severity: String? = "normal") -> UsageLimit {
     #expect(try usage(from: #"{"status": 200, "usage": {"limits": []}}"#) == nil)
 }
 
-@Test func signedOutIsReported() throws {
-    let result = try UsageResponse.decode(Data(#"{"status": 401, "signed_out": true}"#.utf8))
-    #expect(result.signedOut == true)
+@Test func refusedOrganizationListIsReported() throws {
+    let result = try UsageResponse.decode(Data(#"{"status": 401, "refused": true}"#.utf8))
+    #expect(result.refused == true)
+}
+
+@Test func limitsWithoutAPercentAreSkippedNotFatal() throws {
+    let reply = #"""
+    {"status": 200, "org": {"uuid": "o", "rate_limit_tier": "default_claude_max_20x"},
+     "usage": {"limits": [
+       {"kind": "session", "percent": 13, "severity": "normal", "is_active": true},
+       {"kind": "weekly_opus", "percent": null, "severity": null},
+       {"kind": "weekly_all", "severity": "normal"},
+       {"percent": 40, "severity": "normal"}
+     ]}}
+    """#
+    let usage = try #require(try usage(from: reply))
+
+    #expect(usage.limits.map(\.title) == ["Current session", "Limit"])
+    #expect(usage.limits.map(\.percentUsed) == [13, 40])
+    #expect(usage.headline?.title == "Current session")
+}
+
+@Test func fallsBackToPerWindowFieldsWhenEveryLimitLacksAPercent() throws {
+    let reply = #"""
+    {"status": 200, "org": {"uuid": "o", "capabilities": ["claude_pro"]},
+     "usage": {"five_hour": {"utilization": 40.0, "resets_at": null},
+               "limits": [{"kind": "session", "percent": null}]}}
+    """#
+    let usage = try #require(try usage(from: reply))
+    #expect(usage.limits.map(\.title) == ["Current session"])
+    #expect(usage.headline?.percentLeft == 60)
 }
 
 @Test func percentagesOutsideTheRangeAreClamped() {
@@ -120,6 +148,9 @@ private func limit(used: Double, severity: String? = "normal") -> UsageLimit {
 @Test func resetWording() {
     let now = Date(timeIntervalSince1970: 1_000_000)
     #expect(UsageText.resets(at: nil, now: now) == "No reset scheduled")
+    #expect(UsageText.resets(at: now.addingTimeInterval(-1), now: now) == "Reset pending")
+    #expect(UsageText.resets(at: now.addingTimeInterval(-3 * 3600), now: now) == "Reset pending")
+    #expect(UsageText.resets(at: now, now: now) == "Resets in under a minute")
     #expect(UsageText.resets(at: now.addingTimeInterval(30), now: now) == "Resets in under a minute")
     #expect(UsageText.resets(at: now.addingTimeInterval(28 * 60), now: now) == "Resets in 28 min")
     #expect(UsageText.resets(at: now.addingTimeInterval(4 * 3600), now: now) == "Resets in 4 hr")

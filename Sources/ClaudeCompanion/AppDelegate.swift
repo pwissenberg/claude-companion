@@ -989,10 +989,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: NSMenuDelegate {
     /// Rebuilds the usage section so its relative times ("resets in…", "updated…")
-    /// are current, and asks for a fresh reading, which replaces it on arrival.
+    /// are current. This is the hook AppKit designates for changing a menu's items
+    /// before it is shown; `menuWillOpen` is documented as off limits for that,
+    /// and with status menus now drawn out of process the difference matters.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        rebuildUsageMenuItems()
+    }
+
+    /// Asks for a fresh reading, which replaces the section on arrival.
     func menuWillOpen(_ menu: NSMenu) {
         menuIsOpen = true
-        rebuildUsageMenuItems()
         usageMonitor.refresh()
     }
 

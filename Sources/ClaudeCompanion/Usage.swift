@@ -62,8 +62,10 @@ struct UsageFetchResult: Decodable {
     /// HTTP status of the last request made - the organization list if that
     /// failed, otherwise the usage request.
     let status: Int
-    /// Set when the organization list itself was refused: nobody is signed in.
-    let signedOut: Bool?
+    /// Set when the organization list itself was refused (401 or 403). Usually
+    /// that means nobody is signed in, but a Cloudflare challenge answers 403 as
+    /// well, so one refusal on its own does not prove the session is gone.
+    let refused: Bool?
     let org: Organization?
     let usage: UsageResponse?
 }
@@ -74,6 +76,9 @@ struct UsageFetchResult: Decodable {
 /// older per-window fields (`five_hour`, `seven_day`) are kept as a fallback in
 /// case `limits` is ever missing - the response carries a lot of experimental,
 /// codenamed keys, so neither shape can be assumed to be permanent.
+///
+/// Every field of a limit is optional for the same reason: one entry with a null
+/// or missing value must not take the other, perfectly good limits down with it.
 struct UsageResponse: Decodable {
     struct Limit: Decodable {
         struct Scope: Decodable {
@@ -81,9 +86,9 @@ struct UsageResponse: Decodable {
             let model: Model?
         }
 
-        let kind: String
+        let kind: String?
         let group: String?
-        let percent: Double
+        let percent: Double?
         let severity: String?
         let resetsAt: String?
         let scope: Scope?
@@ -110,10 +115,13 @@ extension PlanUsage {
     init?(_ result: UsageFetchResult, fetchedAt: Date) {
         guard let usage = result.usage else { return nil }
 
-        var limits = (usage.limits ?? []).map { limit in
-            UsageLimit(
+        // A limit without a percentage has nothing to show; the rest of the list
+        // is still worth showing, so it is skipped rather than failing the reading.
+        var limits = (usage.limits ?? []).compactMap { limit -> UsageLimit? in
+            guard let percent = limit.percent else { return nil }
+            return UsageLimit(
                 title: Self.title(for: limit),
-                percentUsed: min(max(limit.percent, 0), 100),
+                percentUsed: min(max(percent, 0), 100),
                 resetsAt: limit.resetsAt.flatMap(Self.parseDate),
                 isActive: limit.isActive ?? false,
                 severity: limit.severity
@@ -148,7 +156,7 @@ extension PlanUsage {
         default:
             // An unrecognised kind is still worth showing; its own name is the
             // most honest label available.
-            return limit.kind.replacingOccurrences(of: "_", with: " ").capitalized
+            return (limit.kind ?? "limit").replacingOccurrences(of: "_", with: " ").capitalized
         }
     }
 
@@ -184,6 +192,10 @@ enum UsageText {
     static func resets(at date: Date?, now: Date = Date()) -> String {
         guard let date else { return "No reset scheduled" }
         let seconds = date.timeIntervalSince(now)
+        // A reading can outlive the reset it mentions - the poll after the reset
+        // has not landed yet - and then the honest thing to say is that the reset
+        // has happened, not that it is about to.
+        if seconds < 0 { return "Reset pending" }
         if seconds < 60 { return "Resets in under a minute" }
 
         let minutes = Int(seconds / 60)

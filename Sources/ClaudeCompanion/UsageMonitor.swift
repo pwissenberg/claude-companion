@@ -32,6 +32,12 @@ final class UsageMonitor {
     private var inFlight = false
     private var loggedSummary = ""
     private let interval: TimeInterval = 60
+    /// How many refreshes in a row claude.ai has refused the organization list.
+    private var consecutiveRefusals = 0
+    /// A refused organization list means signed out only once it has happened
+    /// this many times in a row: a Cloudflare challenge answers 403 too, and one
+    /// of those must not throw a valid reading away.
+    private static let refusalsBeforeSignedOut = 2
 
     init(webView: WKWebView) {
         self.webView = webView
@@ -58,6 +64,12 @@ final class UsageMonitor {
         // Mid sign-in the main frame may be on another host, where the request
         // would go to the wrong origin. Still report in, so a reading that ages
         // past `staleAfter` meanwhile is redrawn dimmed.
+        //
+        // The host must be exactly claude.ai, not merely contain it: `fetchJS`
+        // fetches the absolute https://claude.ai origin, and from any other host
+        // (a subdomain included) that is a cross-origin request, which the page's
+        // cookies would not accompany. The navigation delegate's looser check only
+        // decides when to *try* a refresh; this decides whether one can work.
         guard webView.url?.host == "claude.ai" else {
             onChange?()
             return
@@ -77,43 +89,56 @@ final class UsageMonitor {
     }
 
     private func handle(_ result: Result<Any, Error>, preferred: String) {
+        let json: String
+        let fetched: UsageFetchResult
         switch result {
         case .failure(let error):
+            consecutiveRefusals = 0
             fail("Couldn't reach claude.ai", log: error.localizedDescription)
-
+            return
         case .success(let value):
-            guard let json = value as? String, let data = json.data(using: .utf8),
-                  let fetched = try? UsageResponse.decode(data) else {
+            guard let text = value as? String, let data = text.data(using: .utf8),
+                  let decoded = try? UsageResponse.decode(data) else {
+                consecutiveRefusals = 0
                 fail("Unexpected response from claude.ai", log: "\(value)")
                 return
             }
-            if fetched.signedOut == true {
-                // The previous reading belongs to a session that is gone, so
-                // don't keep showing it.
-                usage = nil
-                fail("Sign in to Claude to see usage", log: "HTTP \(fetched.status)")
-                return
-            }
-            guard let reading = PlanUsage(fetched, fetchedAt: Date()) else {
-                fail("claude.ai reported no usage limits", log: "HTTP \(fetched.status): \(json.prefix(300))")
-                return
-            }
-
-            let source = fetched.org?.uuid == preferred ? "Claude Code's organization"
-                : "web session fallback"
-            // Logged only when it changes. Compared as text rather than as values
-            // because a rolling window's reset time shifts slightly between replies.
-            let summary = "\(reading.plan) (\(source)) - " + reading.limits
-                .map { "\($0.title) \(UsageText.percent($0.percentUsed)) used" }
-                .joined(separator: ", ")
-            if summary != loggedSummary || problem != nil {
-                Log.info("usage: \(summary)")
-                loggedSummary = summary
-            }
-            usage = reading
-            problem = nil
-            onChange?()
+            json = text
+            fetched = decoded
         }
+
+        if fetched.refused == true {
+            consecutiveRefusals += 1
+            guard consecutiveRefusals >= Self.refusalsBeforeSignedOut else {
+                fail("Couldn't reach claude.ai", log: "HTTP \(fetched.status), first refusal - keeping the last reading")
+                return
+            }
+            // The previous reading belongs to a session that is gone, so
+            // don't keep showing it.
+            usage = nil
+            fail("Sign in to Claude to see usage", log: "HTTP \(fetched.status)")
+            return
+        }
+        consecutiveRefusals = 0
+        guard let reading = PlanUsage(fetched, fetchedAt: Date()) else {
+            fail("claude.ai reported no usage limits", log: "HTTP \(fetched.status): \(json.prefix(300))")
+            return
+        }
+
+        let source = fetched.org?.uuid == preferred ? "Claude Code's organization"
+            : "web session fallback"
+        // Logged only when it changes. Compared as text rather than as values
+        // because a rolling window's reset time shifts slightly between replies.
+        let summary = "\(reading.plan) (\(source)) - " + reading.limits
+            .map { "\($0.title) \(UsageText.percent($0.percentUsed)) used" }
+            .joined(separator: ", ")
+        if summary != loggedSummary || problem != nil {
+            Log.info("usage: \(summary)")
+            loggedSummary = summary
+        }
+        usage = reading
+        problem = nil
+        onChange?()
     }
 
     private func fail(_ message: String, log detail: String) {
@@ -123,13 +148,32 @@ final class UsageMonitor {
     }
 
     /// The organization Claude Code is signed in to, from `~/.claude.json` (or
-    /// `$CLAUDE_CONFIG_DIR/.claude.json`). Re-read on every refresh, so signing
-    /// Claude Code in to another account is picked up without a relaunch.
+    /// `$CLAUDE_CONFIG_DIR/.claude.json`). Checked on every refresh, so signing
+    /// Claude Code in to another account is picked up without a relaunch - but
+    /// only re-parsed when the file has changed. It also holds Claude Code's
+    /// whole project history and grows to megabytes, which is too much to parse
+    /// on the main thread once a minute for one UUID that almost never changes.
     static func claudeCodeOrganization() -> String? {
+        let url = claudeCodeConfigURL()
+        let modified = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        if let cached = cachedOrganization, cached.url == url, cached.modified == modified {
+            return cached.uuid
+        }
+        let uuid = parseOrganization(from: url)
+        cachedOrganization = (url, modified, uuid)
+        return uuid
+    }
+
+    private static var cachedOrganization: (url: URL, modified: Date?, uuid: String?)?
+
+    private static func claudeCodeConfigURL() -> URL {
         let directory = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]
             .map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser
-        let url = directory.appendingPathComponent(".claude.json")
+        return directory.appendingPathComponent(".claude.json")
+    }
+
+    private static func parseOrganization(from url: URL) -> String? {
         guard let data = try? Data(contentsOf: url),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let account = root["oauthAccount"] as? [String: Any] else { return nil }
@@ -153,7 +197,7 @@ final class UsageMonitor {
 
     const orgs = await load('');
     if (!Array.isArray(orgs.body)) {
-      return JSON.stringify({ status: orgs.status, signed_out: orgs.status === 401 || orgs.status === 403 });
+      return JSON.stringify({ status: orgs.status, refused: orgs.status === 401 || orgs.status === 403 });
     }
 
     const has = (org, capability) => (org.capabilities || []).includes(capability);
